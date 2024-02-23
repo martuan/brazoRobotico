@@ -1,9 +1,9 @@
-Brazo robótico antropomórfico con 4 modos de funcionamiento
-	1) Por defecto: rutina de trabajo hardcodeada
-	2) Por instrucción: puerto serie (1 instrucción cada vez)
-	3) Por rutina cargada: puerto serie (instrucciones multilínea)/bluetooth (instrucción individual)
-	4) Por Bluetooth (instrucción individual)
-
+Brazo robótico antropomórfico con 4 modos de funcionamiento  
+	1) Por defecto: rutina de trabajo hardcodeada  
+ 	2) Por instrucción: puerto serie (1 instrucción cada vez)  
+  	3) Por rutina cargada: puerto serie (instrucciones multilínea)/bluetooth (instrucción individual)  
+	4) Por Bluetooth (instrucción individual)  
+ 
 	Modo de uso:
 	Por puerto serie: 
 		El caracter delimitador es el ';'.
