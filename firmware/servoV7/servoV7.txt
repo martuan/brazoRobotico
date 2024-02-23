@@ -1,0 +1,1144 @@
+/*
+	Brazo robótico antropomórfico con 3 modos de funcionamiento
+	1) Por defecto: rutina de trabajo hardcodeada
+	2) Por instrucción: puerto serie (1 instrucción cada vez)
+	3) Por rutina cargada: puerto serie (instrucciones multilínea)
+*/
+
+#include "Servo.h"
+#include <BluetoothSerial.h>
+
+
+
+//---------Variables globales y defines------------
+
+#define LED_COMUNICACION_SERIE 13
+#define BOTON_POWER	23
+#define LED_PARADA_EMERGENCIA	22
+#define	BOTON_PARADA_EMERGENCIA	21
+#define	BOTON_RESTART	19
+//#define BOTON_LECTURA_COLOR 5
+#define SENSOR_OPTICO 36
+
+#define S0 17
+#define S1 16
+#define S2 4
+#define S3 0
+#define SalidaSensor 15
+#define NO_COLOR -1
+#define BLANCO 0
+#define ROJO 1
+#define VERDE 2
+#define AZUL 3
+
+
+#define UltraLowSpeed 200
+#define LowSpeed 100
+#define NormalSpeed 25
+#define HighSpeed 10
+#define UltraHighSpeed 1
+
+#define modeSelector1 34
+#define modeSelector2 35
+
+#define SIZEOFARRAY(arr)	sizeof(arr)/sizeof(arr[0])
+
+#define INIT_ANGLE_BASE 95//100//90
+#define INIT_ANGLE_LOWERA 90
+#define INIT_ANGLE_LOWERB 90
+#define INIT_ANGLE_MEDIO 80
+#define INIT_ANGLE_SUPERIOR 60
+#define INIT_ANGLE_PINZA 60
+
+// create four servo objects 
+Servo servo1Base;
+Servo servo2LowerA;
+Servo servo3LowerB;
+Servo servo4Medio;
+Servo servo5Superior;
+Servo servo6Pinza;
+
+
+// Published values for SG90 servos; adjust if needed
+int minUs = 540;
+int maxUs = 2100;
+
+
+
+int val1 = 1;
+int valReferencia1 = 0;
+int val2 = 0;
+int valReferencia2 = 0;
+int tolerancia = 50;
+int ADC_MAX = 4095;
+int velocidadPinza = 25;
+int maxCurrent = 1000;
+char flagServo = 0;
+int input = 0;
+int ultimoValor = 0;
+char flagMaxCurrent = 0;
+char flagExisteComando = 0;
+int modo = 0;
+int ms1 = 0;
+int ms2 = 0;
+int ultimoModo = 0;
+int flagUltimaInstruccion = 0;
+int cantidadDeInstrucciones = 0;
+int time1 = 1000;//3000;//6000;//3000;//1500;//300;//1500;
+int time2 = 1000;//3000;
+int color = 1;
+int flagChatchZoneFromHome = 1;
+int flagColorValidado = 0;
+int colorAux = 0;
+int ang = 0;
+int flagParadaEmergencia = 0;
+int flagColorDistinto = 0;
+int flagPower = 0;
+int SensorOpticoUmbral = 15;
+
+// VARIABLES PARA LEER FRECUENCIA
+long Frec_ROJO = 0;
+long Frec_VERDE = 0;
+long Frec_AZUL = 0;
+
+// VARIABLES PARA CALIBRACION DE BLANCOS
+long Frec_Blanco_R = 0;
+long Frec_Blanco_G = 0;
+long Frec_Blanco_B = 0;
+
+byte redColorByte = 0;
+byte greenColorByte = 0;
+byte blueColorByte = 0;
+
+int timeLecturaFrecRGB = 10;
+
+
+char cmd = ' ';
+long servo = 0;
+long angulo = 0;
+long velocidad = 0;
+long demora = 0;
+
+
+// These are all GPIO pins on the ESP32
+// Recommended pins include 2,4,12-19,21-23,25-27,32-33 
+int servo1Pin = 14; //Base
+int servo2Pin = 27;//LowerA
+int servo3Pin = 26;//LowerB
+int servo4Pin = 25;//Medio
+int servo5Pin = 33;//Superior
+int servo6Pin = 32;//Pinza
+
+Servo arrayServo[6] = {};
+int arrayServoPin[6] = {};
+int arrayUltimoValor[6] = {};//para almacenar los últimos ángulos de cada servo
+
+struct instruccion
+{
+	char cmd;
+	int numServo;
+	int angulo;
+	int velocidad;
+	int demora;
+};
+
+instruccion arrayDeInstrucciones[50] = {};//para almacenar las instrucciones de un rutina cargada por puerto serie
+int idxInstruccion = 0;
+
+BluetoothSerial SerialBT;
+
+int arrayLenght = 0;
+
+
+
+//---------Funciones------------------
+void accionarServo(int , int , int, int );
+void parseData(char[]);
+void goToHome(void);
+void goToCatchZoneFromHome(void);
+void goToCatchZone(int);
+int goToDepositZone1(void);
+int goToDepositZone2(void);
+int goToDepositZone3(void);
+int goToDepositZone4(void);
+long Leer_Frecuencias(char);
+void Calibrar_Blanco(void);
+int Leer_Color(void);
+void ISR_ParadaEmergencia(void);
+void ISR_Restart(void);
+void ISR_Power(void);
+
+
+void setup() {
+
+	Serial.begin(115200);
+	SerialBT.begin("ESP32Robot"); //Bluetooth device name
+  	Serial.println("The device started, now you can pair it with bluetooth!");
+	
+	
+	pinMode(modeSelector1, INPUT);
+	pinMode(modeSelector2, INPUT);
+	pinMode(BOTON_RESTART, INPUT);
+	pinMode(BOTON_PARADA_EMERGENCIA, INPUT);
+	//pinMode(BOTON_LECTURA_COLOR, INPUT);
+	pinMode(SENSOR_OPTICO, INPUT);
+
+	pinMode(BOTON_POWER, INPUT);
+	pinMode(LED_PARADA_EMERGENCIA, OUTPUT);
+	pinMode(LED_COMUNICACION_SERIE, OUTPUT);
+
+	// DEFINO LAS SALIDAS
+	pinMode(S0, OUTPUT);
+	pinMode(S1, OUTPUT);
+	pinMode(S2, OUTPUT);
+	pinMode(S3, OUTPUT);
+	
+	// DEFINO ENTRADAS
+	pinMode(SalidaSensor, INPUT);
+	
+
+	// ESCALA DE LA FRECUENCIA DE SALIDA DEL SENSOR AL 100%
+
+	//POWER DOWN S0: LOW, S1: LOW
+	//2% S0: LOW, S1: LOW
+	//20% S0: HIGH, S1: LOW
+	//100% S0: HIGH, S1: HIGH
+	digitalWrite(S0,HIGH);	
+	digitalWrite(S1,HIGH);
+
+    attachInterrupt(digitalPinToInterrupt(BOTON_PARADA_EMERGENCIA), ISR_ParadaEmergencia, CHANGE);
+    attachInterrupt(digitalPinToInterrupt(BOTON_RESTART), ISR_Restart, CHANGE);
+	attachInterrupt(digitalPinToInterrupt(BOTON_POWER), ISR_Power, CHANGE);
+	
+	//verifica el estado del switch POWER
+	if(digitalRead(BOTON_POWER) == 1){
+		flagPower = 1;
+	}else{
+		flagPower = 0;
+	}
+
+	while(flagPower == 0){
+		Serial.println("Encienda el robot");
+		delay(3000);
+	}
+
+	Serial.println(" Calibrando Blanco... ");
+	Calibrar_Blanco();
+	//delay(2500);
+	Serial.println(" Calibracion de Blanco Lista. ");
+	//delay(2500);
+	
+
+
+	
+	//inicializa los arrays
+	arrayServo[0] = servo1Base ;
+	arrayServo[1] = servo2LowerA;
+	arrayServo[2] = servo3LowerB;
+	arrayServo[3] = servo4Medio;
+	arrayServo[4] = servo5Superior;
+	arrayServo[5] = servo6Pinza;
+
+	arrayServoPin[0] = servo1Pin;
+	arrayServoPin[1] = servo2Pin;
+	arrayServoPin[2] = servo3Pin;
+	arrayServoPin[3] = servo4Pin;
+	arrayServoPin[4] = servo5Pin;
+	arrayServoPin[5] = servo6Pin;
+
+	arrayUltimoValor[0] = INIT_ANGLE_BASE;
+	arrayUltimoValor[1] = INIT_ANGLE_LOWERA;
+	arrayUltimoValor[2] = INIT_ANGLE_LOWERB;
+	arrayUltimoValor[3] = INIT_ANGLE_MEDIO;
+	arrayUltimoValor[4] = INIT_ANGLE_SUPERIOR;
+	arrayUltimoValor[5] = INIT_ANGLE_PINZA;
+
+	//attach todos los servos
+	servo6Pinza.attach(servo6Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	servo5Superior.attach(servo5Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	servo4Medio.attach(servo4Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	servo3LowerB.attach(servo3Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	servo2LowerA.attach(servo2Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	servo1Base.attach(servo1Pin, Servo::CHANNEL_NOT_ATTACHED, 0, 180, 560, 2370);//pin 26.  sg90 540, 2360
+	
+
+	goToHome();//realiza el posicionamiento inicial
+
+}
+
+void loop() {
+	
+	int microsegundos = 0;
+	int i = 0;
+	int anguloCierrePinza = 10;//30;
+	int anguloAperturaPinza = 80;
+	char inData[80];
+	byte index = 0;
+	int arrayMuestrasColor[10] = {};
+	int flagSensorOptico = 0;
+	//int ang = 0;
+
+
+
+
+
+	
+		
+
+	
+
+	//detección de modo de funcionamiento
+	ms1 = digitalRead(modeSelector1);
+	ms2 = digitalRead(modeSelector2);
+
+	if(ms1 == 0 && ms2 == 0){//MODO: Hardcodeado
+		modo = 0;
+	}else if(ms1 == 0 && ms2 == 1){//MODO: Por instrucción (1 instrucción cada vez)
+		modo = 1;
+	}else if(ms1 == 1 && ms2 == 0){//MODO: Rutina cargada (instrucciones multilínea)
+		modo = 2;
+	}else if(ms1 == 1 && ms2 == 1){//MODO: Bluetooth Por instrucción (1 instrucción cada vez)
+		modo = 3;
+	}
+
+	if(modo != ultimoModo){//si cambió el modo, lo imprimo
+		Serial.print("modo = ");
+		Serial.println(modo);
+		
+		switch(modo){
+			case 0:
+				Serial.println("Hardcodeado");
+				break;
+
+			case 1:
+				Serial.println("Por instrucción (1 instrucción cada vez) Puerto Serie");
+				break;
+
+			case 2:
+				Serial.println("Rutina cargada (instrucciones multilínea) Bluetooth");
+				break;
+
+			case 3:
+				Serial.println("Bluetooth Por instrucción (1 instrucción cada vez)");
+				break;
+
+			default:
+				Serial.println("Modo incorrecto");
+				break;
+		}
+
+		ultimoModo = modo;//actualiza el último modo seleccionado
+	}
+	
+	switch(modo){
+		case 0: //MODO: Hardcodeado
+
+			
+			flagColorValidado = 0;
+			//color = BLANCO;
+
+			while(flagPower == 0){
+				goToHome();
+				Serial.println("Encienda el robot");
+				delay(3000);
+				flagChatchZoneFromHome = 1;
+			}
+
+			while(flagColorValidado == 0 && flagPower == 1){//mientras no esté validado
+				
+				//Serial.println("entro en el while");
+				flagColorDistinto = 0;
+                
+				//espera recibir tapita
+                //lee varias veces y compara su lectura para descartar un falso positivo.
+				//se asegura que todas las muestras sean del mismo color
+
+				flagSensorOptico = leerSensorOptico();
+
+				if(flagSensorOptico){
+
+					//toma varias muestras de color
+					for(i = 0; i < 10; i++){
+						color = Leer_Color();
+						arrayMuestrasColor[i] = color;
+						delay(100);
+					}
+					//compara las muestras
+					for(i = 0; i < 10; i++){
+						if(color == arrayMuestrasColor[i]){//si la última muestra es igual a todas las anteriores del array
+							
+							//Serial.println("color detectado");
+						}else{
+							flagColorDistinto = 1;
+							Serial.println("color distinto a los anteriores");
+						}
+					}
+					//si el color es validado y es distinto de blanco
+					//si el color es validado y se detecta una pieza (sensor óptico)
+					//va a buscar la pieza
+					if(flagColorDistinto == 0 && flagSensorOptico == 1){
+					//if(flagColorDistinto == 0 && color != BLANCO ){
+					//if(color == colorAux && digitalRead(BOTON_LECTURA_COLOR) == HIGH ){//color validado distinto de blanco
+						flagColorValidado = 1;
+						flagSensorOptico = 0;
+						Serial.println("color  validado");
+						//delay(1000);
+
+						if(flagChatchZoneFromHome == 1){//se posiciona solo la primera vez 
+							flagChatchZoneFromHome = 0;
+							goToCatchZoneFromHome();
+						}else{
+							goToCatchZone(ang);
+						}	
+						
+					}
+
+				}
+            }
+
+			if(color == ROJO){
+                Serial.println("goToDepositZone1");
+				ang = goToDepositZone1();
+			}else if(color == VERDE){
+                Serial.println("goToDepositZone2");
+				ang = goToDepositZone2();
+			}else if(color == AZUL){
+                Serial.println("goToDepositZone3");
+				ang = goToDepositZone3();
+			}else{//si no es ninguno de los anteriores
+                Serial.println("goToDepositZone4");
+				ang = goToDepositZone4();
+			}
+		
+			break;
+		case 1: //MODO: Por instrucción (1 instrucción cada vez)
+		
+			while(flagPower == 0){
+				goToHome();
+				Serial.println("Encienda el robot");
+				delay(3000);
+			}
+
+			//lectura de instrucción pasada por puerto serie
+			while(Serial.available() > 0){
+				char aChar = Serial.read();
+				if(aChar == '\n'){
+
+					inData[index] = NULL;
+					Serial.print("lectura por serial port = ");
+					Serial.println(inData);
+					index = 0;
+					
+					parseData(inData);
+
+					flagExisteComando = 1;
+					
+				}else{
+					inData[index] = aChar;
+					index++;
+					inData[index] = '\0'; // Keep the string NULL terminated
+				}
+			}
+			
+			if(flagExisteComando){
+				flagExisteComando = 0;
+				switch (cmd){
+					case 'A':
+						accionarServo(servo, angulo, velocidad, demora);
+						break;
+
+					default:
+						Serial.println("Comando incorrecto");
+						break;
+
+				}
+			}
+
+			break;
+		case 2: //MODO: Rutina cargada (instrucciones multilínea)
+
+			while(flagPower == 0){
+				goToHome();
+				Serial.println("Encienda el robot");
+				delay(3000);
+			}
+
+			//Recolecta instrucciones por puerto serie
+			while(Serial.available() > 0 ){
+				digitalWrite(LED_COMUNICACION_SERIE, HIGH);
+				char aChar = Serial.read();
+				if(aChar == 'I'){//si llega el inicio de las instrucciones
+					flagUltimaInstruccion = 0;
+					idxInstruccion = 0;
+					break;
+				}
+				if(aChar == 'F'){//si llega el fin de las instrucciones
+					
+					flagUltimaInstruccion = 1;
+					break;
+				}
+				
+				if(aChar == '\n'){//si llega una nueva instrucción
+					
+					
+					inData[index] = NULL;
+					Serial.print("lectura por serial port = ");
+					Serial.println(inData);
+					index = 0;
+					
+					parseData(inData);
+					
+				}else{
+					
+					inData[index] = aChar;
+					index++;
+					inData[index] = '\0'; // Keep the string NULL terminated
+				}
+			}
+
+			digitalWrite(LED_COMUNICACION_SERIE, LOW);
+
+			if(flagUltimaInstruccion){//Si llegó a la última instrucción (no quedan más)
+				
+				cantidadDeInstrucciones = idxInstruccion;
+				
+				Serial.println("Fin de instrucciones");
+				Serial.print("cantidad de instrucciones: ");
+				Serial.println(cantidadDeInstrucciones);
+			
+				//arrayLenght = SIZEOFARRAY(arrayDeInstrucciones);
+
+				
+				//Serial.println(cantidadDeInstrucciones);
+				for(int i = 0; i < cantidadDeInstrucciones; i++){//procesa cada una de las instrucciones cargadas
+					Serial.print("Instrucción nº: ");
+					Serial.println(i + 1);
+					accionarServo(arrayDeInstrucciones[i].numServo, arrayDeInstrucciones[i].angulo, arrayDeInstrucciones[i].velocidad, arrayDeInstrucciones[i].demora);	
+				}
+			}
+
+			break;
+		case 3: //MODO: Bluetooth Por instrucción (1 instrucción cada vez)
+
+			
+			while(flagPower == 0){
+				goToHome();
+				Serial.println("Encienda el robot");
+				delay(3000);
+			}
+			
+			//lectura de instrucción pasada por Bluetooth
+			while(SerialBT.available() > 0){
+
+				char aChar = SerialBT.read();
+
+				if(aChar == '\n'){
+
+					inData[index] = NULL;
+					SerialBT.print("lectura por serial port = ");
+					SerialBT.println(inData);
+					index = 0;
+					
+					parseData(inData);
+
+					flagExisteComando = 1;
+					
+				}else{
+					inData[index] = aChar;
+					index++;
+					inData[index] = '\0'; // Keep the string NULL terminated
+				}
+			}
+
+			if(flagExisteComando){
+				flagExisteComando = 0;
+				switch (cmd){
+					case 'A':
+
+						accionarServo(servo, angulo, velocidad, demora);
+						break;
+
+					default:
+						SerialBT.println("Comando incorrecto");
+						break;
+
+				}
+			}
+
+			break;
+	}
+	
+}
+
+
+void accionarServo(int nombreServo, int angulo, int velocidad, int demora){
+
+	int anguloInicial = 0;
+	int anguloFinal = 0;
+	int i = 0;
+	//Servo servo = arrayServo[nombreServo - 1];
+	int servoPin = arrayServoPin[nombreServo - 1];
+
+	Serial.print("servoPin = ");
+	Serial.println(servoPin);
+	Serial.print("servo = ");
+	Serial.println(nombreServo);
+
+	if(nombreServo < 1 || nombreServo > 6){//comprueba si el servo a accionar está en el rango permitido
+		Serial.println("nombre de servo incorrecto");
+		return;
+	}
+	
+	anguloInicial = arrayUltimoValor[nombreServo - 1];
+
+	Serial.print("angulo inicial = ");
+	Serial.println(anguloInicial);
+
+	anguloFinal = anguloInicial + angulo;
+
+
+
+	if(anguloFinal >= 0 && anguloFinal <= 180){//chequea ángulo valido para desplazarse
+
+		Serial.println("Angulo Final correcto");
+		
+		if(angulo >= 0){//si el desplazamiento es positivo
+			for(i = anguloInicial + 1; i <= anguloFinal; i++){
+
+                
+                while(flagParadaEmergencia == 1){//si se detectó parada de emergencia
+                    //permanece bloqueado el movimiento de los servos
+                    Serial.println("Detenido");
+                    delay(1000);
+				}
+                
+
+				switch (nombreServo)
+				{
+				case 1:
+					servo1Base.write(i);
+					break;
+
+				case 2:
+					servo2LowerA.write(180 - i);
+					servo3LowerB.write(i);
+					break;
+
+				case 3:
+					servo2LowerA.write(180 - i);
+					servo3LowerB.write(i);
+					break;
+
+				case 4:
+					servo4Medio.write(i);
+					break;
+
+				case 5:
+					servo5Superior.write(i);
+					break;
+
+				case 6:
+					servo6Pinza.write(i);
+					break;
+				
+				default:
+					break;
+				}
+
+				delay(velocidad);
+				
+			}
+		}else{//si el desplazamiento es negativo
+			for(i = anguloInicial - 1; i >= anguloFinal; i--){
+
+                while(flagParadaEmergencia == 1){//si se detectó parada de emergencia
+                    //permanece bloqueado el movimiento de los servos
+                    Serial.println("Detenido");
+                    delay(1000);
+				}
+                
+				switch (nombreServo)
+				{
+				case 1:
+					servo1Base.write(i);
+					break;
+
+				case 2:
+					servo2LowerA.write(180 - i);
+					servo3LowerB.write(i);
+					break;
+
+				case 3:
+					servo2LowerA.write(180 - i);
+					servo3LowerB.write(i);
+					break;
+
+				case 4:
+					servo4Medio.write(i);
+					break;
+
+				case 5:
+					servo5Superior.write(i);
+					break;
+
+				case 6:
+					servo6Pinza.write(i);
+					break;
+				
+				default:
+					break;
+				}
+				
+				delay(velocidad);
+				
+			}
+		}
+		
+		Serial.print("angulo actualizado = ");
+		Serial.println(i);
+		arrayUltimoValor[nombreServo - 1] = i;
+	
+		delay(demora);//luego de accionar dicho servo, realiza la demora solicitada
+
+	}else{
+		Serial.println("angulo final no permitido ");
+	}
+
+}
+
+void parseData(char instruccion[]){
+
+
+	//Ejemplo: A,S1,60,100,3000
+	
+	String str_data = "";
+
+	str_data = String(instruccion);
+
+	Serial.print("instruccion = ");
+	Serial.println(instruccion);
+	
+	int CommaIndex1 = str_data.indexOf(',');
+	int CommaIndex2 = str_data.indexOf(',', CommaIndex1 + 1);
+	int CommaIndex3 = str_data.indexOf(',', CommaIndex2 + 1);
+	int CommaIndex4 = str_data.indexOf(',', CommaIndex3 + 1);
+	int CommaIndex5 = str_data.indexOf(',', CommaIndex4 + 1);
+	//int CommaIndex6 = str_data.indexOf(',', CommaIndex5 + 1);
+
+	String param1 = str_data.substring(0, CommaIndex1);//
+	Serial.println(param1);
+	String param2 = str_data.substring(CommaIndex1 + 1, CommaIndex2);
+	Serial.println(param2);
+	String param3 = str_data.substring(CommaIndex2 + 1, CommaIndex3);
+	Serial.println(param3);
+	String param4 = str_data.substring(CommaIndex3 + 1, CommaIndex4);
+	Serial.println(param4);
+	String param5 = str_data.substring(CommaIndex4 + 1, CommaIndex5);
+	Serial.println(param5);
+	
+	cmd = param1[0];
+	
+	param2.remove(0, 1);//quita la letra; para param2 = "S1" => "1"
+	Serial.print("param2 recortado = ");
+	Serial.println(param2);
+
+	servo = param2.toInt();
+	
+	angulo = param3.toInt();
+	velocidad = param4.toInt();
+	demora = param5.toInt();
+
+
+	if(cmd == 'A'){
+
+		//guarda en el arrayDeInstrucciones la nueva instruccion
+		arrayDeInstrucciones[idxInstruccion].cmd = cmd;
+		arrayDeInstrucciones[idxInstruccion].numServo = servo;
+		arrayDeInstrucciones[idxInstruccion].angulo = angulo;
+		arrayDeInstrucciones[idxInstruccion].velocidad = velocidad;
+		arrayDeInstrucciones[idxInstruccion].demora = demora;
+
+		idxInstruccion++;
+
+	}
+	
+
+	//Serial.print(idxInstruccion);
+
+	Serial.print("cmd = ");
+	Serial.print(cmd);
+	Serial.print("\t");
+	Serial.print("servo = ");
+	Serial.print(servo);
+	Serial.print("\t");
+	Serial.print("angulo = ");
+	Serial.print(angulo);
+	Serial.print("\t");
+	Serial.print("velocidad = ");
+	Serial.print(velocidad);
+	Serial.print("\t");
+	Serial.print("delay = ");
+	Serial.println(demora);
+
+
+	
+	param1 = "";
+	param2 = "";
+	param3 = "";
+	param4 = "";
+	param5 = "";
+
+}
+
+void goToHome(void){
+
+
+	//write todos los servos
+	servo6Pinza.write(INIT_ANGLE_PINZA);
+	servo5Superior.write(INIT_ANGLE_SUPERIOR);
+	servo4Medio.write(INIT_ANGLE_MEDIO);
+	servo3LowerB.write(INIT_ANGLE_LOWERB);
+	servo2LowerA.write(INIT_ANGLE_LOWERA);
+	servo1Base.write(INIT_ANGLE_BASE);
+
+	//inicializa los angulos de cada servo
+	arrayUltimoValor[0] = INIT_ANGLE_BASE;
+	arrayUltimoValor[1] = INIT_ANGLE_LOWERA;
+	arrayUltimoValor[2] = INIT_ANGLE_LOWERB;
+	arrayUltimoValor[3] = INIT_ANGLE_MEDIO;
+	arrayUltimoValor[4] = INIT_ANGLE_SUPERIOR;
+	arrayUltimoValor[5] = INIT_ANGLE_PINZA;
+
+
+	Serial.println("GO TO HOME");
+	delay(3000);
+
+}
+
+
+
+
+void goToCatchZoneFromHome(void){
+
+	//Mover Base
+	//accionarServo(1,-45,LowSpeed,time1); // bien
+	accionarServo(1,-40,LowSpeed,time1); // bien
+	//Mover Lower
+	accionarServo(2,-18,LowSpeed,time1); //bien
+	//Mover Medio
+	accionarServo(4,-37,LowSpeed,time1); //bien
+
+	//Mover Superior
+	accionarServo(5,-20,LowSpeed,3000); //bien
+
+
+
+
+/*
+	//Mover Superior
+	accionarServo(5,-35,NormalSpeed,time1); //bien
+	
+	//Mover pinza
+	accionarServo(6,-50,NormalSpeed,time1); //bien
+
+	//Mover Superior
+	accionarServo(5,35,NormalSpeed,time1); //bien
+*/	
+
+	//Mover Medio
+	accionarServo(4,-25,LowSpeed,time1); //bien
+
+	//Mover pinza
+	accionarServo(6,-50,LowSpeed,time1); //bien
+
+	//Mover Medio
+	accionarServo(4,25,LowSpeed,time1); //bien
+
+
+}
+
+void goToCatchZone(int angulo){
+
+	angulo = 0 - angulo;
+	//Mover Base
+	accionarServo(1,angulo,NormalSpeed,time1); // bien
+	
+	/*
+	//Mover Superior
+	accionarServo(5,-35,NormalSpeed,time1); //bien
+	
+	//Mover pinza
+	accionarServo(6,-50,NormalSpeed,time1); //bien
+
+	//Mover Superior
+	accionarServo(5,35,NormalSpeed,time1); //bien
+	*/
+
+	//Mover Medio
+	accionarServo(4,-25,NormalSpeed,time2); //bien
+
+	//Mover pinza
+	accionarServo(6,-50,NormalSpeed,time1); //bien
+
+	//Mover Medio
+	accionarServo(4,25,NormalSpeed,time1); //bien
+
+
+
+}
+
+int goToDepositZone1(void){
+
+
+	//Mover Base
+	int angulo = 42;//47;//42;
+	accionarServo(1,angulo,NormalSpeed,time2); // bien
+
+	//Mover pinza
+	accionarServo(6,50,NormalSpeed,time1); //bien
+
+	return angulo;
+}
+
+int goToDepositZone2(void){
+
+	//Mover Base
+	int angulo = 57;
+	accionarServo(1,angulo,NormalSpeed,time2); // bien
+
+	//Mover pinza
+	accionarServo(6,50,NormalSpeed,time1); //bien
+    //servo6Pinza.write(80);
+
+	return angulo;
+}
+
+int goToDepositZone3(void){
+
+    //Mover Base
+	int angulo = 68;
+	accionarServo(1,angulo,NormalSpeed,time2); // bien
+
+	//Mover pinza
+	accionarServo(6,50,NormalSpeed,time1); //bien
+
+	return angulo;
+}
+
+int goToDepositZone4(void){
+
+    //Mover Base
+	int angulo = 75;//80;
+	accionarServo(1,angulo,NormalSpeed,time2); // bien
+
+	//Mover pinza
+	accionarServo(6,50,NormalSpeed,time1); //bien
+
+	return angulo;
+}
+
+
+
+// EN ESTA FUNCION VOY A LEER LA FRECUENCIA QUE VIENE DEL SENSOR DE COLOR,
+// INGRESO CON UN NOMBRE DE COLOR Y ME DEVUELVE LA FRECUENCIA MEDIDA
+long Leer_Frecuencias(char Color){
+
+  long Frec_Salida = 0;
+
+  switch (Color){
+    case ROJO:
+      digitalWrite(S2,LOW);
+      digitalWrite(S3,LOW);
+      break;
+    case VERDE:
+      digitalWrite(S2,HIGH);
+      digitalWrite(S3,HIGH);
+      break;
+    case AZUL:
+      digitalWrite(S2,LOW);
+      digitalWrite(S3,HIGH);
+      break;
+  }
+
+  // LEO LA FRECUENCIA DEL COLOR QUE CORRESPONDA
+  Frec_Salida = pulseIn(SalidaSensor, LOW);
+
+  return Frec_Salida;
+
+}
+
+// ESTA FUNCION LO QUE HACE ES LEER LAS FRECUENCIAS DE SALIDA DEL SENSOR Y GRABARLAS EN VARIABLES
+// LAS TOMA COMO REFERENCIA DE CERO O COLOR BLANCO, OSEA CUANDO NO HAY NINGUN OBJETO
+// SE DEBRIA USAR AL INICIAR EL DISPOSITIVO
+void Calibrar_Blanco (void){
+
+
+
+	int promedioRGB = 0;
+	int i = 0;	
+	int sumatoriaRojo = 0;
+	int sumatoriaVerde = 0;
+	int sumatoriaAzul = 0;
+  
+
+	//toma varias muestras de cada color y las promedia
+
+	for(i = 0; i < 10; i++){
+		Frec_ROJO = Leer_Frecuencias (ROJO);
+		sumatoriaRojo += Frec_ROJO;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_Blanco_R = sumatoriaRojo/10;//frecuencia promediada del rojo
+
+
+	for(i = 0; i < 10; i++){
+		Frec_VERDE = Leer_Frecuencias (VERDE);
+		sumatoriaVerde += Frec_VERDE;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_Blanco_G = sumatoriaVerde/10;//frecuencia promediada del verde
+
+	for(i = 0; i < 10; i++){
+		Frec_AZUL = Leer_Frecuencias (AZUL);
+		sumatoriaAzul += Frec_AZUL;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_Blanco_B = sumatoriaAzul/10;//frecuencia promediada del azul
+
+
+	
+	Serial.print(" R = ");
+	Serial.print(Frec_Blanco_R);
+	Serial.print(" G = ");
+	Serial.print(Frec_Blanco_G);
+	Serial.print(" B = ");
+	Serial.println(Frec_Blanco_B);
+
+}
+
+// ESTA FUNCION ES LA QUE ME DEVUELVE EL COLOR QUE EL SENSOR TIENE.
+// ME DEVUELVE UN DEFINE DEL COLOR QUE DETECTO
+int Leer_Color (void){
+
+  	
+	int porcentajeTolerancia = 50;	  
+	int CTE_MAX_DESV_ROJO = Frec_Blanco_R * porcentajeTolerancia/100;
+	int CTE_MAX_DESV_VERDE = Frec_Blanco_G * porcentajeTolerancia/100;
+	int CTE_MAX_DESV_AZUL = Frec_Blanco_B * porcentajeTolerancia/100;
+	int i = 0;	
+	int sumatoriaRojo = 0;
+	int sumatoriaVerde = 0;
+	int sumatoriaAzul = 0;
+	int cantMuestras = 3;//10;
+  
+
+	//toma varias muestras de cada color y las promedia
+	for(i = 0; i < cantMuestras; i++){
+		Frec_ROJO = Leer_Frecuencias (ROJO);
+		sumatoriaRojo += Frec_ROJO;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_ROJO = sumatoriaRojo/cantMuestras;
+
+	for(i = 0; i < cantMuestras; i++){
+		Frec_VERDE = Leer_Frecuencias (VERDE);
+		sumatoriaVerde += Frec_VERDE;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_VERDE = sumatoriaVerde/cantMuestras;
+
+	for(i = 0; i < cantMuestras; i++){
+		Frec_AZUL = Leer_Frecuencias (AZUL);
+		sumatoriaAzul += Frec_AZUL;
+		delay(timeLecturaFrecRGB);
+	}
+	Frec_AZUL = sumatoriaAzul/cantMuestras;
+
+
+	
+
+
+    Serial.print("R = ");
+    Serial.print(Frec_ROJO);
+  
+    Serial.print(" G = ");
+    Serial.print(Frec_VERDE);
+
+    Serial.print(" B = ");
+    Serial.println(Frec_AZUL);
+
+    //compara las frecuencias de cada color con las frecuencias calibradas del blanco, teniendo en cuenta una tolerancia
+	if(Frec_ROJO >= Frec_Blanco_R - CTE_MAX_DESV_ROJO && Frec_ROJO <= Frec_Blanco_R + CTE_MAX_DESV_ROJO &&
+		Frec_VERDE >= Frec_Blanco_G - CTE_MAX_DESV_VERDE && Frec_VERDE <= Frec_Blanco_G + CTE_MAX_DESV_VERDE &&
+		Frec_AZUL >= Frec_Blanco_B - CTE_MAX_DESV_AZUL && Frec_AZUL <= Frec_Blanco_B + CTE_MAX_DESV_AZUL){
+
+		Serial.println(" BLANCO ");
+      	return BLANCO;
+	}
+
+    //si no es blanco, compara las frecuencias de un color contra las demás y devuelve el color detectado
+	else if(Frec_ROJO < Frec_VERDE && Frec_ROJO < Frec_AZUL){
+      Serial.println(" ROJO ");
+      return ROJO;
+    }
+	//al azul se le agrega un porcentaje para que se detecte el Verde en el caso que estén muy parejos Verde y Azul
+    else if(Frec_VERDE < Frec_ROJO && Frec_VERDE < Frec_AZUL * 1.1){
+      Serial.println(" VERDE ");
+      return VERDE;
+    }
+    else if(Frec_AZUL < Frec_ROJO && Frec_AZUL < Frec_VERDE){
+      Serial.println(" AZUL ");
+      return AZUL;
+    }
+	else{
+		Serial.println("Color no detectado");
+		return NO_COLOR;
+	}
+
+}
+
+
+void ISR_ParadaEmergencia(void){
+
+	flagParadaEmergencia = 1;
+    Serial.println("flagParadaEmergencia = 1");
+	//enciende el led de parada de emergencia
+	digitalWrite(LED_PARADA_EMERGENCIA, HIGH);
+	
+}
+
+void ISR_Restart(void){
+
+	flagParadaEmergencia = 0;
+    Serial.println("flagParadaEmergencia = 0");
+    //apaga el led de parada de emergencia
+	digitalWrite(LED_PARADA_EMERGENCIA, LOW);
+}
+
+void ISR_Power(void){
+
+	if(digitalRead(BOTON_POWER) == 0){
+		flagPower = 0;
+	}else{
+		flagPower = 1;
+	}
+}
+
+int leerSensorOptico(void){
+
+	int valor = 0;
+
+	valor = analogRead(SENSOR_OPTICO);
+	valor = map(valor, 0, 4095, 0, 255);
+
+	Serial.print("sensor optico = ");
+	Serial.println(valor);
+
+	if(valor >= SensorOpticoUmbral){
+		Serial.println("Pieza detectada");
+		return 1;
+	}else{
+		return 0;
+	}
+
+}
